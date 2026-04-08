@@ -6,15 +6,16 @@ high-resolution optical maps (e.g. 2m Orthophotos).
 Correlates optical textures (roads, roofs) rather than typography.
 """
 
-import os, json, csv, math
+import os, json, csv, math, re
 import cv2
 import numpy as np
 import rasterio
 from pyproj import Transformer
 from PIL import Image, ImageDraw
-from navigation.matcher import FFTMatcher
+from navigation.matcher import FFTMatcher, ORBMatcher
 
 # ── Config ─────────────────────────────────────────────────────────────
+USE_ORB        = False
 PHOTO_DIR      = "Test photos 3"
 ORTHO_PATH     = r"C:\Users\True Debreuil\Documents\RedRock Pi color 1 res.tif"
 GPS_TRUTH_FILE = "gps_ground_truth.json"
@@ -42,7 +43,10 @@ def footprint_px(agl, hfov_deg, img_w, img_h, res):
     return max(1, int(gnd_w / res)), max(1, int(gnd_h / res))
 
 def main():
-    matcher = FFTMatcher()
+    if USE_ORB:
+        matcher = ORBMatcher(max_features=1000)
+    else:
+        matcher = FFTMatcher()
 
     with open(GPS_TRUTH_FILE) as f:
         gps_truth = json.load(f)
@@ -64,10 +68,51 @@ def main():
             img_gray = cv2.imread(os.path.join(PHOTO_DIR, photo_name), cv2.IMREAD_GRAYSCALE)
             if img_gray is None:
                 continue
+
+            # ── Yaw & Altitude Extraction (Multi-Strategy Robust) ───────────
+            yaw_deg = 0.0
+            agl_m   = AGL_M
+            with open(os.path.join(PHOTO_DIR, photo_name), 'rb') as fp:
+                data = fp.read()
+                s = data.find(b'<x:xmpmeta')
+                e = data.find(b'</x:xmpmeta>')
+                if s != -1 and e != -1:
+                    xstr = data[s:e+12].decode('utf-8', 'ignore')
+                    
+                    # 1. Extraction: Yaw
+                    yaw_matches = re.findall(r'FlightYawDegree=["\']?([+-]?[0-9.]+)', xstr, re.I)
+                    if yaw_matches:
+                        try: yaw_deg = float(yaw_matches[0])
+                        except: pass
+
+                    # 2. Extraction: Altitude (Relative -> Last Altitude -> Single Altitude)
+                    alt_matches = re.findall(r'RelativeAltitude=["\']?([+-]?[0-9.]+)', xstr, re.I)
+                    if alt_matches:
+                        try: agl_m = abs(float(alt_matches[0]))
+                        except: pass
+                    else:
+                        # Fallback: Many DJI photos log [Absolute, Relative] in generic 'Altitude' tags
+                        gen_alts = re.findall(r'Altitude=["\']?([+-]?[0-9.]+)', xstr, re.I)
+                        if len(gen_alts) >= 2:
+                            try: agl_m = abs(float(gen_alts[-1]))
+                            except: pass
+                        elif gen_alts:
+                            try: agl_m = abs(float(gen_alts[0]))
+                            except: pass
+
+            if abs(yaw_deg) > 0.1:
+                # Rotate drone frame to North-Up
+                angle = -yaw_deg
+                (h, w) = img_gray.shape[:2]
+                (cX, cY) = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
+                img_gray = cv2.warpAffine(img_gray, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+
+            # Read dims AFTER rotation — footprint must reflect rotated shape
             img_h, img_w = img_gray.shape
 
-            # ── Compute footprint ────────────────────────────────────
-            tile_w, tile_h = footprint_px(AGL_M, HFOV_DEG, img_w, img_h, ORTHO_RES)
+            # ── Compute footprint using live per-photo AGL ────────────
+            tile_w, tile_h = footprint_px(agl_m, HFOV_DEG, img_w, img_h, ORTHO_RES)
 
             # ── Extract Ortho tile + margin ─────────────────────────
             margin_px = int(MARGIN_M / ORTHO_RES)
@@ -94,25 +139,59 @@ def main():
             # ── Resize photo to its footprint size (anti-aliased) ────
             photo_resized = cv2.resize(img_gray, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
 
-            # ── Slide photo over the Ortho tile ──────────────────────
-            step = max(1, int(10.0 / ORTHO_RES)) # 10m steps dynamically scaled to map resolution
-            best_psr = -1; best_dr = 0; best_dc = 0
-            for dr in range(0, search_h - tile_h + 1, step):
-                for dc in range(0, search_w - tile_w + 1, step):
-                    patch = ortho_gray[dr:dr+tile_h, dc:dc+tile_w]
-                    _, _, psr_c = matcher.match(photo_resized, patch, edge_match=True, native_size=True)
-                    if psr_c > best_psr:
-                        best_psr = psr_c; best_dr = dr; best_dc = dc
-            psr = best_psr
+            # ── Tracking Sequence ────────────────────────────────────
+            if USE_ORB:
+                # Direct Homography computation natively scans the absolute patch
+                dr_offset, dc_offset, inliers = matcher.match(photo_resized, ortho_gray)
+                best_dr = dr_offset
+                best_dc = dc_offset
+                psr = inliers
+            else:
+                # ── Normalized Cross-Correlation Template Matching ──────────
+                # Apply Canny edge detection to isolate geometric structures 
+                p_blur = cv2.GaussianBlur(photo_resized, (5, 5), 0)
+                o_blur = cv2.GaussianBlur(ortho_gray, (5, 5), 0)
+                p_edge = cv2.Canny(p_blur, 50, 150)
+                o_edge = cv2.Canny(o_blur, 50, 150)
+                
+                # Thicken structural vectors
+                kernel = np.ones((3,3), np.uint8)
+                p_edge = cv2.dilate(p_edge, kernel, iterations=1)
+                o_edge = cv2.dilate(o_edge, kernel, iterations=1)
+
+                # Template Match natively slides the photo across the ortho window
+                res = cv2.matchTemplate(o_edge, p_edge, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                
+                # max_loc corresponds to the top-left (x,y) or (col, row) of the best match
+                # Output format aligns with dr (row scale), dc (col scale)
+                best_dc = max_loc[0]
+                best_dr = max_loc[1]
+                psr = max_val  # Correlation score (0.0 to 1.0)
 
             # Offset from centre of search window
-            dc_centre = best_dc - margin_px
-            dr_centre = best_dr - margin_px
+            if USE_ORB:
+                dc_centre = best_dc - (search_w / 2.0)
+                dr_centre = best_dr - (search_h / 2.0)
+            else:
+                # Template match outputs the top-left coordinate! 
+                # To align with the map center, subtract the margin.
+                dc_centre = best_dc - margin_px
+                dr_centre = best_dr - margin_px
 
             dx_m = dc_centre * ORTHO_RES   # positive = east
             dy_m = dr_centre * ORTHO_RES   # positive = south
 
-            if psr < MIN_PSR:
+            # Fallback if Match Confidence is too low
+            is_fallback = False
+            if USE_ORB:
+                if psr < MIN_PSR:
+                    is_fallback = True
+            else:
+                if psr < 0.03: # NORMED Template Match returns ~0.05 to ~0.50
+                    is_fallback = True
+            
+            if is_fallback:
                 dx_m, dy_m = 0.0, 0.0
 
             corr_mag = math.sqrt(dx_m**2 + dy_m**2)
@@ -127,7 +206,7 @@ def main():
 
             error_m = haversine_m(gps_lat, gps_lon, ref_lat, ref_lon)
 
-            print(f"{photo_name}  err={corr_mag:5.1f}m  PSR={psr:5.2f}")
+            print(f"{photo_name}  err={corr_mag:5.1f}m  PSR={psr:5.2f}  AGL={agl_m:.1f}m  Yaw={yaw_deg:.1f}°")
 
             rows.append({
                 "photo":    photo_name,
@@ -135,7 +214,7 @@ def main():
                 "trn_lat":  ref_lat, "trn_lon":  ref_lon,
                 "correction_m": round(corr_mag, 1),
                 "psr":      round(psr, 2),
-                "fallback": psr < MIN_PSR,
+                "fallback": is_fallback,
             })
 
     # ── CSV ───────────────────────────────────────────────────────────

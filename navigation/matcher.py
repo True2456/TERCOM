@@ -114,6 +114,63 @@ class FFTMatcher:
         
         return cv2.warpPerspective(img, H, (w, h))
 
+class ORBMatcher:
+    def __init__(self, max_features=1000):
+        self.orb = cv2.ORB_create(max_features)
+        # NORM_HAMMING is required for ORB descriptor comparison
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        
+    def match(self, live_frame, map_tile, native_size=True):
+        """
+        Extracts keypoints using ORB and returns the best affine shift mapping
+        the center of live_frame to map_tile.
+        """
+        # 1. Feature Extraction
+        kp1, des1 = self.orb.detectAndCompute(live_frame, None)
+        kp2, des2 = self.orb.detectAndCompute(map_tile, None)
+        
+        if des1 is None or des2 is None or len(des1) < 4 or len(des2) < 4:
+            return 0.0, 0.0, 0.0  # Failed to match enough features
+            
+        # 2. Descriptor Matching
+        matches = self.matcher.match(des1, des2)
+        # Sort them in the order of their distance
+        matches = sorted(matches, key=lambda x: x.distance)
+        
+        # We need at least 4 good matches to find Homography
+        if len(matches) < 4:
+            return 0.0, 0.0, 0.0
+            
+        # Extract location of good matches
+        pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+        pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+        
+        # 3. Find Homography (Perspective Transform)
+        matrix, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
+        
+        if matrix is None:
+            return 0.0, 0.0, 0.0
+            
+        # The number of inliers (matches that fit the physical geometry) acts as our 'confidence' score
+        # replacing the concept of a 'PSR' in Phase Correlation.
+        inliers = np.sum(mask)
+        
+        # 4. Map the center of the drone photo to the map tile
+        h, w = live_frame.shape[:2]
+        center_pt = np.float32([[[w / 2.0, h / 2.0]]])
+        transformed_center = cv2.perspectiveTransform(center_pt, matrix)
+        
+        tc_x, tc_y = transformed_center[0][0]
+        
+        # To make it compatible with the exact outputs expected by the `trn_refinement_optical.py` slider:
+        # Instead of sliding the window physically, we are comparing the photo directly against the ENTIRE patch.
+        # But wait, trn_refinement_optical.py expects dr, dc offset of the top-left corner relative to the sliding window step.
+        # Let's adjust trn_refinement_optical.py to NOT use a sliding window if ORB is used!
+        # ORB inherently compares the photo against the full map tile natively without sliding windows!
+        # So we can just return the center offset coordinate mapping!
+        
+        return float(tc_x), float(tc_y), float(inliers)
+
 if __name__ == "__main__":
     # Test with synthetic offset
     matcher = FFTMatcher()

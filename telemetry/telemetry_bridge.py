@@ -38,7 +38,11 @@ class TelemetryBridge:
             'roll': 0,
             'yaw': 0,
             'time_boot_ms': 0,
-            'armed': False
+            'armed': False,
+            # Ground speed components (cm/s from MAVLink, converted to m/s)
+            'vx': 0.0,  # North velocity m/s
+            'vy': 0.0,  # East velocity m/s
+            'vz': 0.0,  # Down velocity m/s
         }
         
         self.running = False
@@ -72,6 +76,10 @@ class TelemetryBridge:
                 self.latest_data['lat'] = msg.lat / 1e7
                 self.latest_data['lon'] = msg.lon / 1e7
                 self.latest_data['time_boot_ms'] = msg.time_boot_ms
+                # Ground velocities (vx/vy/vz in cm/s -> m/s)
+                self.latest_data['vx'] = msg.vx / 100.0
+                self.latest_data['vy'] = msg.vy / 100.0
+                self.latest_data['vz'] = msg.vz / 100.0
                 # Fallback altitude if DISTANCE_SENSOR is missing
                 if self.latest_data.get('alt_agl', 0) == 0:
                     self.latest_data['alt_agl'] = msg.relative_alt / 1000.0 # mm to m

@@ -148,12 +148,12 @@ def main():
                 psr = inliers
             else:
                 # ── Normalized Cross-Correlation Template Matching ──────────
-                # Apply Canny edge detection to isolate geometric structures 
+                # Apply Canny edge detection to isolate geometric structures
                 p_blur = cv2.GaussianBlur(photo_resized, (5, 5), 0)
                 o_blur = cv2.GaussianBlur(ortho_gray, (5, 5), 0)
                 p_edge = cv2.Canny(p_blur, 50, 150)
                 o_edge = cv2.Canny(o_blur, 50, 150)
-                
+
                 # Thicken structural vectors
                 kernel = np.ones((3,3), np.uint8)
                 p_edge = cv2.dilate(p_edge, kernel, iterations=1)
@@ -162,12 +162,10 @@ def main():
                 # Template Match natively slides the photo across the ortho window
                 res = cv2.matchTemplate(o_edge, p_edge, cv2.TM_CCOEFF_NORMED)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-                
-                # max_loc corresponds to the top-left (x,y) or (col, row) of the best match
-                # Output format aligns with dr (row scale), dc (col scale)
+
                 best_dc = max_loc[0]
                 best_dr = max_loc[1]
-                psr = max_val  # Correlation score (0.0 to 1.0)
+                psr = max_val
 
             # Offset from centre of search window
             if USE_ORB:
@@ -263,10 +261,10 @@ def main():
             draw.line([gx, gy, tx, ty], fill="red", width=2)
             draw.ellipse([gx-6,gy-6,gx+6,gy+6], fill="lime")
             draw.ellipse([tx-5,ty-5,tx+5,ty+5], fill="yellow" if r["fallback"] else "#00FFFF")
-            if i % 3 == 0:
-                lbl = f"{r['photo'][:8]} {r['correction_m']:.0f}m"
-                # Black outline for visibility on bright map
-                draw.text((gx+7, gy-10), lbl, fill="black", stroke_width=2, stroke_fill="white")
+            
+            lbl = f"{r['photo'][:8]} {r['correction_m']:.0f}m"
+            # Black outline for visibility on bright map
+            draw.text((gx+7, gy-10), lbl, fill="black", stroke_width=2, stroke_fill="white")
 
         draw.rectangle([5,5,250,75], fill=(0,0,0, 200))
         draw.ellipse([12,14,22,24], fill="lime");   draw.text((26,12), "GPS position", fill="lime")

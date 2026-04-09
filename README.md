@@ -1,5 +1,7 @@
 # TERCOM: Optical Terrain Referenced Navigation (TRN)
 
+<img width="800" height="800" alt="drone_path_viz" src="https://github.com/user-attachments/assets/cec2f26d-930f-42ca-be4d-1708bc410885" />
+
 This repository contains a prototype software stack for simulating **Optical Terrain Referenced Navigation (TRN)** tailored for autonomous VTOL drones operating in GNSS-denied environments. 
 
 It implements a purely vision-based localization pipeline that compares downward-facing camera imagery against known georeferenced satellite/orthophoto maps in real-time, feeding accurate positional data back to the flight controller when the primary GPS fails.

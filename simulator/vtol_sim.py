@@ -106,6 +106,9 @@ class TailsitterSim:
             time.sleep(0.05) # 20Hz Loop
             
     def _update_physics(self, dt):
+        # 🛡️ Zero-division protection for high-frequency or Windows precision quirks
+        dt = max(0.001, dt)
+
         if not self.is_armed:
             # Force absolute zero on all vectors when disarmed 🛰️
             self.vx = 0.0
@@ -116,111 +119,118 @@ class TailsitterSim:
             return
             
         # Basic VTOL Physics for Mission Testing
-        if self.mode in ["AUTO", "TAKEOFF", "GUIDED"]:
-            target_alt = self.drone_cfg["transition_alt_m"]
+        if self.mode == "AUTO":
+            # 2. Waypoint Navigation
+            self.vz = 0.0
             
-            if self.alt >= target_alt:
-                self.is_transitioned = True
-
-            if not self.is_transitioned:
-                # 1. Vertical Climb Mode
-                if self.vz == 0: print(f"[PHYSICS] Mode: {self.mode} | Action: Vertical Takeoff to {target_alt}m", flush=True)
-                self.vz = self.drone_cfg["climb_rate_ms"]
-                self.pitch = 0.0 # Standard Level Climb
-                self.alt += self.vz * dt
-            else:
-                # 2. Waypoint Navigation
-                self.vz = 0.0
-                
-                # --- MISSION ENGINE: Consume non-navigation commands instantly ---
-                while len(self.waypoints) > 0 and self.current_waypoint < len(self.waypoints):
-                    wp = self.waypoints[self.current_waypoint]
-                    cmd = wp.command if hasattr(wp, 'command') else wp.get('command', 0)
+            # --- MISSION ENGINE: Consume non-navigation commands instantly ---
+            while len(self.waypoints) > 0 and self.current_waypoint < len(self.waypoints):
+                wp = self.waypoints[self.current_waypoint]
+                cmd = wp.command if hasattr(wp, 'command') else wp.get('command', 0)
                     
-                    if cmd == 178: # MAV_CMD_DO_CHANGE_SPEED
-                        new_speed = wp.param2 if hasattr(wp, 'param2') else wp.get('param2', self.target_speed_ms)
-                        if new_speed > 0: self.target_speed_ms = new_speed
-                        print(f"Mission SITL: [EXEC] DO_CHANGE_SPEED -> {self.target_speed_ms} m/s", flush=True)
-                        self.current_waypoint += 1
-                        continue # Re-check next item in same frame
-                    elif cmd in [16, 22, 82, 84, 85]: # NAV_WAYPOINT, NAV_TAKEOFF, NAV_VTOL_TAKEOFF...
-                        break
-                    else:
-                        # Skip other non-positional items (Condition, Jump, etc.)
-                        self.current_waypoint += 1
-
-                if len(self.waypoints) > 0 and self.current_waypoint < len(self.waypoints):
-                    wp = self.waypoints[self.current_waypoint]
-                    target_lat = wp.x / 1e7 if hasattr(wp, 'x') else wp['lat']
-                    target_lon = wp.y / 1e7 if hasattr(wp, 'y') else wp['lon']
-                    target_alt_msl = wp.z if hasattr(wp, 'z') else wp['alt']
-                    
-                    dist = self._get_distance_metres(self.lat, self.lon, target_lat, target_lon)
-                    
-                    if dist < 5.0: # 5m Arrival Radius
-                        print(f"Mission SITL: Waypoint {self.current_waypoint} reached! (Dist: {dist:.1f}m)", flush=True)
-                        with self.lock:
-                            for conn in self.conns:
-                                conn.mav.mission_item_reached_send(self.current_waypoint)
-                        self.current_waypoint += 1
-                        
-                        # 🛰️ Mission End Guard: Transition to LOITER at final WP
-                        if self.current_waypoint >= len(self.waypoints):
-                            print("Mission SITL: [AUTO-RECOVERY] Final Waypoint hit. Entering Coordinated Orbit.", flush=True)
-                            self.mode = "LOITER"
-                            self.target_lat = target_lat
-                            self.target_lon = target_lon
-                        return 
-                    
-                    # --- FLIGHT DYNAMICS: Coordinated Turn Model ---
-                    target_bearing = self._get_bearing(self.lat, self.lon, target_lat, target_lon)
-                    diff = (target_bearing - self.yaw + 180) % 360 - 180
-                    
-                    # Limit turn rate based on config (Realistic arcs)
-                    max_step = self.drone_cfg["max_yaw_rate_deg"] * dt
-                    step = max(-max_step, min(max_step, diff * 0.1)) # Smoothly move but cap rate
-                    
-                    prev_yaw = self.yaw
-                    self.yaw = (self.yaw + step) % 360
-                    
-                    # Coordinated Banking (Roll): Proportional to turn rate
-                    turn_rate_s = step / dt
-                    # INVERTED for GCS HUD Calibration 🛰️
-                    # APPLY LERP (0.1 Alpha) to dampen high-frequency vibration 🛰️
-                    raw_target_roll = - (turn_rate_s * self.drone_cfg["bank_factor"])
-                    raw_target_roll = max(-self.drone_cfg["max_roll_deg"], min(self.drone_cfg["max_roll_deg"], raw_target_roll))
-                    self.roll = (self.roll * 0.9) + (raw_target_roll * 0.1)
-                    
-                    self.pitch = 0.0 # Level cruise
-                    
-                    # Apply Speed Clamping (15-35 m/s)
-                    speed = max(self.drone_cfg["min_speed_ms"], min(self.drone_cfg["max_speed_ms"], self.target_speed_ms))
-                    
-                    # Directional Velocity based on current Yaw
-                    self.vx = speed * math.cos(math.radians(90 - self.yaw))
-                    self.vy = speed * math.sin(math.radians(90 - self.yaw))
-                    
-                    # Update lat/lon
-                    self.lat += (self.vy * dt) / 111111.0
-                    self.lon += (self.vx * dt) / (111111.0 * math.cos(math.radians(self.lat)))
-                    
-                    # Vertical correction (move toward target altitude)
-                    if self.alt < target_alt_msl - 1: self.alt += 2.0 * dt
-                    elif self.alt > target_alt_msl + 1: self.alt -= 2.0 * dt
+                if cmd == 178: # MAV_CMD_DO_CHANGE_SPEED
+                    new_speed = wp.param2 if hasattr(wp, 'param2') else wp.get('param2', self.target_speed_ms)
+                    if new_speed > 0: self.target_speed_ms = new_speed
+                    print(f"Mission SITL: [EXEC] DO_CHANGE_SPEED -> {self.target_speed_ms} m/s", flush=True)
+                    self.current_waypoint += 1
+                    continue # Re-check next item in same frame
+                elif cmd in [16, 22, 82, 84, 85]: # NAV_WAYPOINT, NAV_TAKEOFF, NAV_VTOL_TAKEOFF...
+                    break
                 else:
-                    # MISSION COMPLETE FALLBACK: Coordinated Loiter and Pitch Level 🛰️
-                    self.mode = "LOITER"
-                    self.pitch = 0.0
-                    self.vx = 0.0
-                    self.vy = 0.0
-                    print(f"[PHYSICS] Mission Complete | Mode: {self.mode} | Target: Last Waypoint", flush=True)
-        elif self.mode in ["FBWA", "CIRCLE", "LOITER"]:
+                    # Skip other non-positional items (Condition, Jump, etc.)
+                    self.current_waypoint += 1
+
+            if len(self.waypoints) > 0 and self.current_waypoint < len(self.waypoints):
+                wp = self.waypoints[self.current_waypoint]
+                target_lat = wp.x / 1e7 if hasattr(wp, 'x') else wp['lat']
+                target_lon = wp.y / 1e7 if hasattr(wp, 'y') else wp['lon']
+                target_alt_msl = wp.z if hasattr(wp, 'z') else wp['alt']
+                
+                dist = self._get_distance_metres(self.lat, self.lon, target_lat, target_lon)
+                
+                if dist < 5.0: # 5m Arrival Radius
+                    print(f"Mission SITL: Waypoint {self.current_waypoint} reached! (Dist: {dist:.1f}m)", flush=True)
+                    with self.lock:
+                        for conn in self.conns:
+                            conn.mav.mission_item_reached_send(self.current_waypoint)
+                    self.current_waypoint += 1
+                    
+                    # 🛰️ Mission End Guard: Transition to LOITER at final WP
+                    if self.current_waypoint >= len(self.waypoints):
+                        print("Mission SITL: [AUTO-RECOVERY] Final Waypoint hit. Entering Coordinated Orbit.", flush=True)
+                        self.mode = "LOITER"
+                        self.target_lat = target_lat
+                        self.target_lon = target_lon
+                    return 
+                    
+                # --- FLIGHT DYNAMICS: Coordinated Turn Model ---
+                target_bearing = self._get_bearing(self.lat, self.lon, target_lat, target_lon)
+                diff = (target_bearing - self.yaw + 180) % 360 - 180
+                
+                # Limit turn rate based on config (Realistic arcs)
+                max_step = self.drone_cfg["max_yaw_rate_deg"] * dt
+                step = max(-max_step, min(max_step, diff * 0.1)) # Smoothly move but cap rate
+                
+                prev_yaw = self.yaw
+                self.yaw = (self.yaw + step) % 360
+                
+                # Coordinated Banking (Roll): Proportional to turn rate
+                turn_rate_s = step / dt
+                # INVERTED for GCS HUD Calibration 🛰️
+                # APPLY LERP (0.1 Alpha) to dampen high-frequency vibration 🛰️
+                raw_target_roll = - (turn_rate_s * self.drone_cfg["bank_factor"])
+                raw_target_roll = max(-self.drone_cfg["max_roll_deg"], min(self.drone_cfg["max_roll_deg"], raw_target_roll))
+                self.roll = (self.roll * 0.9) + (raw_target_roll * 0.1)
+                
+                self.pitch = 0.0 # Level cruise
+                
+                # Apply Speed Clamping (15-35 m/s)
+                speed = max(self.drone_cfg["min_speed_ms"], min(self.drone_cfg["max_speed_ms"], self.target_speed_ms))
+                
+                # Directional Velocity based on current Yaw
+                self.vx = speed * math.cos(math.radians(90 - self.yaw))
+                self.vy = speed * math.sin(math.radians(90 - self.yaw))
+                
+                # Update lat/lon
+                self.lat += (self.vy * dt) / 111111.0
+                self.lon += (self.vx * dt) / (111111.0 * math.cos(math.radians(self.lat)))
+                
+                # Vertical correction (move toward target altitude)
+                if self.alt < target_alt_msl - 1: self.alt += 2.0 * dt
+                elif self.alt > target_alt_msl + 1: self.alt -= 2.0 * dt
+            else:
+                # MISSION COMPLETE FALLBACK: Coordinated Loiter and Pitch Level 🛰️
+                self.mode = "LOITER"
+                self.pitch = 0.0
+                self.vx = 0.0
+                self.vy = 0.0
+                print(f"[PHYSICS] Mission Complete | Mode: {self.mode} | Target: Last Waypoint", flush=True)
+        elif self.mode in ["GUIDED", "FBWA", "CIRCLE", "LOITER"]:
             # Level high-speed horizontal cruise or orbiting 🛰️
             self.pitch = 0.0
             self.vz = 0.0
             speed = self.drone_cfg["cruise_speed_ms"]
             
-            if self.mode in ["CIRCLE", "LOITER"]:
+            # --- GUIDED/LOITER Altitude Management ---
+            # Move toward target_alt if we aren't there yet
+            if self.alt < self.target_alt - 0.5: self.alt += 2.5 * dt
+            elif self.alt > self.target_alt + 0.5: self.alt -= 2.5 * dt
+
+            if self.mode == "GUIDED":
+                # Fly toward the dynamic target lat/lon set by the controller 🛰️
+                target_bearing = self._get_bearing(self.lat, self.lon, self.target_lat, self.target_lon)
+                diff = (target_bearing - self.yaw + 180) % 360 - 180
+                max_step = self.drone_cfg["max_yaw_rate_deg"] * dt
+                step = max(-max_step, min(max_step, diff * 0.1))
+                self.yaw = (self.yaw + step) % 360
+                
+                # Banking
+                turn_rate_s = step / dt
+                raw_target_roll = - (turn_rate_s * self.drone_cfg["bank_factor"])
+                raw_target_roll = max(-self.drone_cfg["max_roll_deg"], min(self.drone_cfg["max_roll_deg"], raw_target_roll))
+                self.roll = (self.roll * 0.9) + (raw_target_roll * 0.1)
+
+            elif self.mode in ["CIRCLE", "LOITER"]:
                 # ArduPilot-Grade Proportional Loiter Steering (Tangent Merge) 🛰️
                 # We calculate a target bearing that leads the drone onto the loiter radius.
                 target_radius = 50.0 
@@ -277,7 +287,7 @@ class TailsitterSim:
             self.vz = 0.0
             
             if self.mode == "TAKEOFF":
-                climb_rate = 2.2 # 2.2m/s realistic heavy climb 🛰️
+                climb_rate = 15.0 # Accelerated climb for testing purposes
                 self.vx = 0.0
                 self.vy = 0.0
                 self.pitch = 0.0
@@ -355,9 +365,15 @@ class TailsitterSim:
                 current_speed = math.sqrt(self.vx**2 + self.vy**2)
                 
                 if current_speed >= 15.0:
-                    self.mode = "LOITER"
+                    # Transition complete: switch back to navigation logic
+                    # If we have waypoints, go AUTO, otherwise stay in GUIDED
+                    if len(self.waypoints) > 0 and self.current_waypoint < len(self.waypoints):
+                        self.mode = "AUTO"
+                    else:
+                        self.mode = "GUIDED"
+                    
                     self.pitch = 0.0 # Return to cruise pitch
-                    print(f"Mission SITL: Transition complete ({current_speed:.1f} m/s). Entering Orbitring.", flush=True)
+                    print(f"Mission SITL: Transition complete ({current_speed:.1f} m/s). Mode: {self.mode}", flush=True)
             
             elif self.mode in ["QLOITER", "QRTL", "QSTABILIZE"]:
                 self.vx = 0.0
@@ -403,63 +419,66 @@ class TailsitterSim:
             pass
             
     def _broadcast_telemetry(self):
-        # 1. Heartbeat (1Hz)
-        now = time.time()
-        with self.lock:
-            if now - self.last_hb >= 1.0:
-                self.last_hb = now
-                custom_mode = self.mode_map.get(self.mode, 0)
-                base_mode = mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
-                if self.is_armed:
-                    base_mode |= mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                
+        try:
+            # 1. Heartbeat (1Hz)
+            now = time.time()
+            with self.lock:
+                if now - self.last_hb >= 1.0:
+                    self.last_hb = now
+                    custom_mode = self.mode_map.get(self.mode, 0)
+                    base_mode = mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+                    if self.is_armed:
+                        base_mode |= mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                    
+                    for conn in self.conns:
+                        conn.mav.heartbeat_send(
+                            mavutil.mavlink.MAV_TYPE_FIXED_WING, 
+                            mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
+                            base_mode,
+                            custom_mode,
+                            mavutil.mavlink.MAV_STATE_ACTIVE if self.is_armed else mavutil.mavlink.MAV_STATE_STANDBY
+                        )
+                        # Mission status broadcast
+                        if len(self.waypoints) > 0:
+                            conn.mav.mission_current_send(self.current_waypoint)
+                    
+                    print(f"Mission SITL: Heartbeat dispatched (Mode: {self.mode}) [ACTIVE-MULTI]", flush=True)
+                    
+                # 2. System Status (2Hz)
                 for conn in self.conns:
-                    conn.mav.heartbeat_send(
-                        mavutil.mavlink.MAV_TYPE_FIXED_WING, 
-                        mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-                        base_mode,
-                        custom_mode,
-                        mavutil.mavlink.MAV_STATE_ACTIVE if self.is_armed else mavutil.mavlink.MAV_STATE_STANDBY
+                    conn.mav.sys_status_send(
+                        0, 0, 0, 500, int(12400), # 12.4V
+                        self.batt_pct, 0, 0, 0, 0, 0, 0, 0
                     )
-                    # Mission status broadcast
-                    if len(self.waypoints) > 0:
-                        conn.mav.mission_current_send(self.current_waypoint)
-                
-                print(f"Mission SITL: Heartbeat dispatched (Mode: {self.mode}) [ACTIVE-MULTI]", flush=True)
-                
-            # 2. System Status (2Hz)
-            for conn in self.conns:
-                conn.mav.sys_status_send(
-                    0, 0, 0, 500, int(12400), # 12.4V
-                    self.batt_pct, 0, 0, 0, 0, 0, 0, 0
-                )
-        
-        with self.lock:
-            # 3. Attitude (10Hz)
-            for conn in self.conns:
-                conn.mav.attitude_send(
-                    self._get_boot_ms(),
-                    math.radians(self.roll),
-                    math.radians(self.pitch),
-                    math.radians(self.yaw),
-                    0, 0, 0
-                )
             
-            if self.gps_enabled:
-                # 4.1 GPS_RAW_INT (10Hz) - Primary GPS
+            with self.lock:
+                # 3. Attitude (10Hz)
                 for conn in self.conns:
-                    conn.mav.gps_raw_int_send(
-                        self._get_boot_ms() * 1000, 3, 
-                        int(self.lat * 1e7), int(self.lon * 1e7), int(self.alt * 1000), 
-                        100, 100, 0, 0, 10
+                    conn.mav.attitude_send(
+                        self._get_boot_ms(),
+                        math.radians(self.roll),
+                        math.radians(self.pitch),
+                        math.radians(self.yaw),
+                        0, 0, 0
                     )
                 
-            # 4.1.2 GLOBAL_POSITION_INT (10Hz) - Fused Position for Map
-            # This is critical for the GCS map update 🛰️
-            if self.gps_enabled or (self.gps2_enabled and self.gps2_data):
-                # Use TRN position if primary GPS is disabled
-                out_lat = self.gps2_data['lat'] if (not self.gps_enabled and self.gps2_data) else self.lat
-                out_lon = self.gps2_data['lon'] if (not self.gps_enabled and self.gps2_data) else self.lon
+                if self.gps_enabled:
+                    # 4.1 GPS_RAW_INT (10Hz) - Primary GPS
+                    for conn in self.conns:
+                        conn.mav.gps_raw_int_send(
+                            self._get_boot_ms() * 1000, 3, 
+                            int(self.lat * 1e7), int(self.lon * 1e7), int(self.alt * 1000), 
+                            100, 100, 0, 0, 10
+                        )
+                    
+                # 4.1.2 GLOBAL_POSITION_INT (10Hz) - Fused Position for Map
+                # Always send, fallback to ground truth if all GPS fail 🛰️
+                if not self.gps_enabled and self.gps2_data:
+                    out_lat = self.gps2_data['lat']
+                    out_lon = self.gps2_data['lon']
+                else:
+                    out_lat = self.lat
+                    out_lon = self.lon
                 
                 for conn in self.conns:
                     conn.mav.global_position_int_send(
@@ -470,56 +489,47 @@ class TailsitterSim:
                         int(self.vx * 100), int(self.vy * 100), int(self.vz * 100),
                         int(self.yaw * 100)
                     )
-            
-            # 4.2 GPS2 / EXTERN RELAY (GPS_INPUT #232 or GPS_RAW_INT #24) 🛰️
-            if self.gps2_enabled and self.gps2_data:
-                for conn in self.conns:
-                    # Relay the incoming TRN position to the GCS as GPS2
-                    conn.mav.gps2_raw_int_send(
-                        self._get_boot_ms() * 1000, 
-                        int(self.gps2_data['fix_type']),
-                        int(self.gps2_data['lat'] * 1e7), 
-                        int(self.gps2_data['lon'] * 1e7), 
-                        int(self.gps2_data['alt'] * 1000), 
-                        100, 100, 0, 0, 
-                        int(self.gps2_data['satellites_visible'])
-                    )
-            
-            # 4.3 EKF_STATUS_REPORT (2Hz) 🛰️
-            # Health depends on GPS2 (TRN) in this simulated tactical mode 🛰️
-            ekf_flags = 8 if self.gps2_enabled else 0
-            for conn in self.conns:
-                conn.mav.ekf_status_report_send(
-                    ekf_flags, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1
-                )
-            
-            # 5. VFR_HUD (5Hz)
-            # Decoupled from GPS status to simulate Baro & Airspeed sensor suite 🛰️
-            spd_2d = math.sqrt(self.vx**2 + self.vy**2)
-            for conn in self.conns:
-                conn.mav.vfr_hud_send(
-                    spd_2d,      # Airspeed (Independent Sensor)
-                    spd_2d,      # Groundspeed
-                    int(self.yaw),
-                    50,          # Throttle (Assume cruising)
-                    self.alt,    # Altitude (Barometric / SF20 Lidar)
-                    -self.vz     # Climb rate (inverted for VFR_HUD convention)
-                )
                 
+                # 4.2 GPS2 Relay (GPS2_RAW #124) 🛰️
+                if self.gps2_enabled and self.gps2_data:
+                    try:
+                        for conn in self.conns:
+                            conn.mav.gps2_raw_send(
+                                self._get_boot_ms() * 1000, 
+                                int(self.gps2_data.get('fix_type', 3)),
+                                int(self.gps2_data.get('lat', 0) * 1e7), 
+                                int(self.gps2_data.get('lon', 0) * 1e7), 
+                                int(self.gps2_data.get('alt', 0) * 1000), 
+                                100, 100, 0, 0, 
+                                int(self.gps2_data.get('satellites_visible', 10)),
+                                0, 0 # dgps_numch, dgps_age
+                            )
+                    except Exception as ge:
+                        print(f"[RELY] GPS2 Mapping Error: {ge}")
+                
+                # 4.3 EKF_STATUS_REPORT (2Hz)
+                ekf_flags = 8 if self.gps2_enabled else 0
+                for conn in self.conns:
+                    conn.mav.ekf_status_report_send(
+                        ekf_flags, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1
+                    )
+                
+                # 5. VFR_HUD (5Hz)
+                spd_2d = math.sqrt(self.vx**2 + self.vy**2)
+                for conn in self.conns:
+                    conn.mav.vfr_hud_send(
+                        spd_2d, spd_2d, int(self.yaw), 50, self.alt, -self.vz
+                    )
+
                 # 6. DISTANCE_SENSOR (10Hz): Simulate LightWare SF20 Lidar Rangefinder 🛰️
-                # Sends relative altitude to ground at high frequency for terrain following.
-                # current_distance is uint16 (0 to 65535 cm)
                 dist_cm = max(0, min(65535, int(self.alt * 100)))
-                conn.mav.distance_sensor_send(
-                    self._get_boot_ms(),
-                    10,          # Min Distance (cm)
-                    10000,       # Max Distance (cm)
-                    dist_cm,
-                    mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,
-                    1,           # Sensor ID
-                    mavutil.mavlink.MAV_SENSOR_ROTATION_PITCH_270, # Downward
-                    255          # Covariance (Unknown)
-                )
+                for conn in self.conns:
+                    conn.mav.distance_sensor_send(
+                        self._get_boot_ms(),
+                        10, 10000, dist_cm,
+                        mavutil.mavlink.MAV_DISTANCE_SENSOR_LASER,
+                        1, mavutil.mavlink.MAV_SENSOR_ROTATION_PITCH_270, 255
+                    )
 
                 # 7. NAV_CONTROLLER_OUTPUT (5Hz): Track mission waypoint distance 🛰️
                 wp_dist = 0.0
@@ -529,11 +539,13 @@ class TailsitterSim:
                     t_lon = wp.y / 1e7 if hasattr(wp, 'y') else wp['lon']
                     wp_dist = self._get_distance_metres(self.lat, self.lon, t_lat, t_lon)
                 
-                # Clamp wp_dist to uint16 (0 to 65535 meters) 🛡️
                 safe_wp_dist = max(0, min(65535, int(wp_dist)))
-                conn.mav.nav_controller_output_send(
-                    0, 0, int(self.yaw), int(self.yaw), safe_wp_dist, 0, 0, 0
-                )
+                for conn in self.conns:
+                    conn.mav.nav_controller_output_send(
+                        0, 0, int(self.yaw), int(self.yaw), safe_wp_dist, 0, 0, 0
+                    )
+        except Exception as e:
+            print(f"[TELEMETRY] Broadcast Error: {e}")
 
     def _recv_loop(self):
         while self.running:

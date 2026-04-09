@@ -16,47 +16,48 @@ class PathVisualizer:
         self.hillshade = np.zeros((self.canvas_size, self.canvas_size, 3), dtype=np.uint8)
         self.hillshade += 40 # Dark grey base
         
-        # Load DEM for Background
-        try:
-            print(f"[VIZ] Loading background elevation data from {dem_path}...")
-            with rasterio.open(dem_path) as src:
-                self.src_crs = src.crs
-                self.src_transform = src.transform
-                self.full_width = src.width
-                self.full_height = src.height
-                
-                # Read 1st channel, resampled to 800x800
-                # out_shape can be (800, 800) for a 2D result if count is specified in read()
-                data_800 = src.read(1, out_shape=(self.canvas_size, self.canvas_size)).astype(np.float32)
-                
-                # Cleanup NoData
-                no_data_mask = data_800 < -1e10
-                if np.any(~no_data_mask):
-                    data_800[no_data_mask] = np.nanmin(data_800[~no_data_mask])
-                else:
-                    data_800[no_data_mask] = 0
-                
-                # Create shaded relief
-                dx = cv2.Sobel(data_800, cv2.CV_32F, 1, 0, ksize=3)
-                dy = cv2.Sobel(data_800, cv2.CV_32F, 0, 1, ksize=3)
-                
-                slope_mag = np.sqrt(np.clip(dx**2 + dy**2, 0, 1e6))
-                shade = 255 * (1.0 - (np.arctan(slope_mag * 0.2) / (np.pi/2)))
-                shade = np.clip(shade, 0, 255).astype(np.uint8)
-                
-                # Colorize for tactical look
-                color_map = cv2.cvtColor(shade, cv2.COLOR_GRAY2BGR)
-                # Apply a slight blue/cyan tint for "Night Vision / Tactical" feel
-                overlay = np.zeros_like(color_map)
-                overlay[:] = (40, 20, 0) # Dark Blue/Cyan in BGR
-                self.hillshade = cv2.addWeighted(color_map, 0.5, overlay, 0.5, 0)
-                
-            self.transformer = Transformer.from_crs("EPSG:4326", self.src_crs, always_xy=True)
-            self.map_loaded = True
-            print("[VIZ] DEM Background initialized successfully.")
-        except Exception as e:
-            print(f"[VIZ] WARNING: DEM background failed ({e}). Using standard grid.")
-            self.map_loaded = False
+        # Load DEM for Background if available
+        self.map_loaded = False
+        if dem_path and os.path.exists(dem_path):
+            try:
+                print(f"[VIZ] Loading background elevation data from {dem_path}...")
+                with rasterio.open(dem_path) as src:
+                    self.src_crs = src.crs
+                    self.src_transform = src.transform
+                    self.full_width = src.width
+                    self.full_height = src.height
+                    
+                    # Read 1st channel, resampled to 800x800
+                    data_800 = src.read(1, out_shape=(self.canvas_size, self.canvas_size)).astype(np.float32)
+                    
+                    # Cleanup NoData
+                    no_data_mask = data_800 < -1e10
+                    if np.any(~no_data_mask):
+                        data_800[no_data_mask] = np.nanmin(data_800[~no_data_mask])
+                    else:
+                        data_800[no_data_mask] = 0
+                    
+                    # Create shaded relief
+                    dx = cv2.Sobel(data_800, cv2.CV_32F, 1, 0, ksize=3)
+                    dy = cv2.Sobel(data_800, cv2.CV_32F, 0, 1, ksize=3)
+                    
+                    slope_mag = np.sqrt(np.clip(dx**2 + dy**2, 0, 1e6))
+                    shade = 255 * (1.0 - (np.arctan(slope_mag * 0.2) / (np.pi/2)))
+                    shade = np.clip(shade, 0, 255).astype(np.uint8)
+                    
+                    # Colorize for tactical look
+                    color_map = cv2.cvtColor(shade, cv2.COLOR_GRAY2BGR)
+                    overlay = np.zeros_like(color_map)
+                    overlay[:] = (40, 20, 0)
+                    self.hillshade = cv2.addWeighted(color_map, 0.5, overlay, 0.5, 0)
+                    
+                self.transformer = Transformer.from_crs("EPSG:4326", self.src_crs, always_xy=True)
+                self.map_loaded = True
+                print("[VIZ] DEM Background initialized successfully.")
+            except Exception as e:
+                print(f"[VIZ] WARNING: DEM background failed ({e}). Using standard grid.")
+        
+        if not self.map_loaded:
             self.lat_min, self.lat_max = -30.00, -29.98
             self.lon_min, self.lon_max = 153.22, 153.24
 

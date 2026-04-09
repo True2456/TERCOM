@@ -59,17 +59,29 @@ class TelemetryBridge:
     def _listen_loop(self):
         last_heartbeat = 0
         while self.running:
-            # Send Heartbeat at 1Hz
-            if time.time() - last_heartbeat > 1.0:
-                self.mav.mav.heartbeat_send(
-                    mavutil.mavlink.MAV_TYPE_GCS, 
-                    mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0
-                )
-                last_heartbeat = time.time()
+            try:
+                # Send Heartbeat at 1Hz
+                if time.time() - last_heartbeat > 1.0:
+                    self.mav.mav.heartbeat_send(
+                        mavutil.mavlink.MAV_TYPE_GCS, 
+                        mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0
+                    )
+                    last_heartbeat = time.time()
 
-            msg = self.mav.recv_match(type=['GLOBAL_POSITION_INT', 'ATTITUDE', 'DISTANCE_SENSOR', 'HEARTBEAT'], blocking=False)
-            if msg is None:
-                time.sleep(0.01)
+                msg = self.mav.recv_match(
+                    type=['GLOBAL_POSITION_INT', 'ATTITUDE', 'DISTANCE_SENSOR', 'HEARTBEAT'], 
+                    blocking=False
+                )
+                if msg is None:
+                    time.sleep(0.01)
+                    continue
+            except ConnectionResetError:
+                # Standard WinUDP quirk: ignore and retry
+                time.sleep(0.1)
+                continue
+            except Exception as e:
+                print(f"[TELEMETRY] Listener error: {e}")
+                time.sleep(0.1)
                 continue
                 
             if msg.get_type() == 'GLOBAL_POSITION_INT':

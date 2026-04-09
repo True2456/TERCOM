@@ -1,4 +1,4 @@
-"""
+r"""
 Live TRN Map Visualizer
 ========================
 Connects to ArduPilot SITL on port 14552 (separate from the main controller
@@ -36,7 +36,7 @@ import os
 os.environ['MAVLINK20'] = '1'
 
 # ── Config ─────────────────────────────────────────────────────────────────
-SITL_ADDR   = 'udpin:127.0.0.1:14552'   # Second GCS port — SITL allows multiple
+SITL_ADDR   = 'udpout:127.0.0.1:14552'   # Send heartbeats to the server port
 ORTHO_PATH  = r"C:\Users\True Debreuil\Documents\RedRock Pi color 1 res.tif"
 ORTHO_RES   = 0.5      # m/px
 HFOV_DEG    = 69.7     # DJI Mini 3 Pro
@@ -66,20 +66,41 @@ class LiveTelemetry:
         print(f"[VIZ] Connecting to SITL on {addr}...")
         self.mav = mavutil.mavlink_connection(addr, source_system=254)
         self.pose = {'lat': 0, 'lon': 0, 'alt_agl': 50.0, 'yaw': 0.0,
-                     'vx': 0.0, 'vy': 0.0}
+                     'vx': 0.0, 'vy': 0.0, 'last_msg': 0}
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _loop(self):
+        last_send = 0
         while True:
-            msg = self.mav.recv_match(
-                type=['GLOBAL_POSITION_INT', 'ATTITUDE'], blocking=True, timeout=1
-            )
+            # Broadcast heartbeat to SITL so it knows where to return telemetry over UDP
+            now = time.time()
+            if now - last_send > 1.0:
+                self.mav.mav.heartbeat_send(
+                    mavutil.mavlink.MAV_TYPE_GCS, 
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID, 
+                    0, 0, 0
+                )
+                last_send = now
+
+            try:
+                msg = self.mav.recv_match(
+                    type=['GLOBAL_POSITION_INT', 'ATTITUDE', 'HEARTBEAT'], 
+                    blocking=True, timeout=0.5
+                )
+            except ConnectionResetError:
+                time.sleep(0.5)
+                continue
+            except Exception as e:
+                print(f"[VIZ] Telemetry recv error: {e}")
+                time.sleep(0.5)
+                continue
             if msg is None:
                 continue
             t = msg.get_type()
             with self._lock:
+                self.pose['last_msg'] = time.time()
                 if t == 'GLOBAL_POSITION_INT':
                     self.pose['lat'] = msg.lat / 1e7
                     self.pose['lon'] = msg.lon / 1e7
@@ -115,7 +136,8 @@ def main():
         if pose['lat'] == 0:
             # No fix yet — show waiting screen
             blank = np.zeros((WIN_SIZE + 60, WIN_SIZE, 3), dtype=np.uint8)
-            cv2.putText(blank, "Waiting for SITL GPS fix...", (20, WIN_SIZE // 2),
+            status = "MAVLink OK (Waiting for GPS...)" if (time.time() - pose['last_msg'] < 2.0) else "Connecting to SITL..."
+            cv2.putText(blank, status, (20, WIN_SIZE // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2)
             cv2.imshow("TRN Live Map", blank)
             if cv2.waitKey(200) == 27:

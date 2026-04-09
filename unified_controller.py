@@ -33,15 +33,15 @@ MIN_PSR         = 0.10         # Minimum correlation score to submit a fix
 # than the IMU-reported ground speed, the fix is rejected as a false positive.
 EKF_VELOCITY_MARGIN = 15.0     # m/s
 
-TARGET_ALT      = 50.0         # Mission altitude (m)
+TARGET_ALT      = 250.0        # Mission altitude (m)
 WP_RADIUS       = 30.0         # Waypoint arrival radius (m)
 
-# Mission waypoints (headland orbit)
+# Mission waypoints (shifted to the drone track over the town)
 WAYPOINTS = [
-    (-29.985, 153.228),   # WP1: North
-    (-29.987, 153.231),   # WP2: East (Cliffside)
-    (-29.990, 153.228),   # WP3: South
-    (-29.987, 153.225),   # WP4: West
+    (-29.982434, 153.226002), # WP1: Town edge
+    (-29.982456, 153.229035), # WP2: Across town
+    (-29.984878, 153.226731), # WP3: Returning inland
+    (-29.985594, 153.226489), # WP4: Back
 ]
 
 # ── Coordinate helpers ────────────────────────────────────────────────────────
@@ -140,6 +140,7 @@ def main():
     gps_killed   = False
     trn_accepted = 0
     trn_rejected = 0
+    flight_history = []
 
     # Coordinate transformers
     to_mga   = Transformer.from_crs("EPSG:4326", "EPSG:28356", always_xy=True)
@@ -171,7 +172,7 @@ def main():
                     state = "TAKEOFF"
 
             elif state == "TAKEOFF":
-                if pose['alt_agl'] > 5.0:
+                if pose['alt_agl'] >= TARGET_ALT - 2.0:
                     print("[MISSION] Altitude cleared. Engaging TRN loop.")
                     state = "TRANSIT"
 
@@ -189,7 +190,7 @@ def main():
                         commander.mav.mav.command_long_send(
                             commander.mav.target_system,
                             commander.mav.target_component,
-                            31010, 0, 1, 0, 0, 0, 0, 0, 0
+                            31010, 0, 0, 0, 0, 0, 0, 0, 0
                         )
                         gps_killed = True
 
@@ -242,18 +243,6 @@ def main():
                         margin_px: margin_px + tile_w
                     ].copy()
 
-                    # 3. Apply yaw counter-rotation to align to North-Up
-                    #    angle = -yaw_deg (validated camera mount offset)
-                    if abs(yaw_deg) > 0.1:
-                        angle = -yaw_deg
-                        M = cv2.getRotationMatrix2D(
-                            (tile_w // 2, tile_h // 2), angle, 1.0
-                        )
-                        virtual_frame = cv2.warpAffine(
-                            virtual_frame, M, (tile_w, tile_h),
-                            borderMode=cv2.BORDER_REPLICATE
-                        )
-
                     # 4. Canny edge extraction on both frames
                     p_blur = cv2.GaussianBlur(virtual_frame, (5, 5), 0)
                     o_blur = cv2.GaussianBlur(ortho_gray,    (5, 5), 0)
@@ -278,6 +267,7 @@ def main():
                         trn_e = gps_e + dx_m
                         trn_n = gps_n - dy_m
                         trn_lon, trn_lat = to_wgs84.transform(trn_e, trn_n)
+                        err_m = haversine_m(gps_lat, gps_lon, trn_lat, trn_lon)
 
                         # 7. EKF kinematic gate ──────────────────────────
                         imu_speed = math.sqrt(
@@ -288,12 +278,23 @@ def main():
                             trn_accepted += 1
                             match_str = (f"LOCK (PSR:{psr:.2f} "
                                          f"acc:{trn_accepted} rej:{trn_rejected})")
+                            flight_history.append({"gps_lat": gps_lat, "gps_lon": gps_lon, "trn_lat": trn_lat, "trn_lon": trn_lon, "status": "LOCK", "err_m": err_m})
                         else:
                             trn_rejected += 1
                             match_str = (f"EKF_REJECTED (PSR:{psr:.2f} "
                                          f"acc:{trn_accepted} rej:{trn_rejected})")
+                            flight_history.append({"gps_lat": gps_lat, "gps_lon": gps_lon, "trn_lat": trn_lat, "trn_lon": trn_lon, "status": "EKF_REJECTED", "err_m": err_m})
                     else:
                         match_str = f"LOW_CONF (PSR:{psr:.2f})"
+                        flight_history.append({"gps_lat": gps_lat, "gps_lon": gps_lon, "trn_lat": 0, "trn_lon": 0, "status": "LOW_CONF", "err_m": 0})
+                        
+                    if len(flight_history) > 0 and len(flight_history) % 10 == 0:
+                        import json
+                        try:
+                            with open("sitl_flight_history.json", "w") as f:
+                                json.dump(flight_history, f)
+                        except:
+                            pass
 
             # ── Dashboard ─────────────────────────────────────────────────
             viz.update(pose['lat'], pose['lon'], state, match_str)
@@ -305,6 +306,14 @@ def main():
             time.sleep(0.5)
 
     except KeyboardInterrupt:
+        import json
+        try:
+            with open("sitl_flight_history.json", "w") as f:
+                json.dump(flight_history, f)
+            print(f"[UNIFIED] Saved sitl_flight_history.json with {len(flight_history)} frames!")
+        except Exception as e:
+            print("[UNIFIED] Could not save flight history:", e)
+            
         print("[UNIFIED] Shutting down...")
         commander.stop()
         src.close()

@@ -1,6 +1,6 @@
 # TERCOM: Optical Terrain Referenced Navigation (TRN)
 
-![Uploading sitl_ekf_simulation_map.png…]()
+<img width="600" height="600" alt="sitl_ekf_simulation_map" src="https://github.com/user-attachments/assets/efdeddd1-4e5e-4382-8fb1-616a01f8df5a" />
 
 This repository contains a prototype software stack for simulating **Optical Terrain Referenced Navigation (TRN)** tailored for autonomous VTOL drones operating in GNSS-denied environments. 
 

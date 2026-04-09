@@ -57,35 +57,40 @@ def main():
         draw.line([gps_pts[i], gps_pts[i+1]], fill="lime", width=3)
 
     COLOURS = {
-        "LOCK":         "#00FFFF",   # cyan
-        "EKF_REJECTED": "red",
-        "LOW_CONF":     "orange",
+        "LOCK":         "#00FFFF",   # cyan  – structural anchor confirmed
+        "FLOW":         "#FFD700",   # gold  – optical flow tracking
+        "EKF_REJECTED": "#FF4444",   # red   – EKF kinematic gate rejection
+        "LOW_CONF":     "#FF8C00",   # orange – low template confidence
     }
 
     for i, r in enumerate(rows):
         gx, gy = gps_pts[i]
         tx, ty = to_canvas(r['trn_lat'], r['trn_lon'])
-        col = COLOURS.get(r['status'], "white")
+        col = COLOURS.get(r['status'], "#AAAAAA")
 
+        # Draw connecting line from GPS truth to TRN estimate for LOCKs
         if r['status'] == "LOCK":
             draw.line([gx, gy, tx, ty], fill="white", width=1)
 
-        draw.ellipse([gx-6, gy-6, gx+6, gy+6], fill="lime")
-        
-        if r['status'] != "LOW_CONF":
-            draw.ellipse([tx-5, ty-5, tx+5, ty+5], fill=col)
+        # GPS ground truth dot (always drawn)
+        draw.ellipse([gx-5, gy-5, gx+5, gy+5], fill="lime")
 
-            # Draw every 3rd label so it doesn't get too messy
-            if r['status'] == "LOCK" and i % 3 == 0:
-                label = f"{r['err_m']:.0f}m"
-                draw.text((tx+7, ty-10), label, fill="white", stroke_width=2, stroke_stroke="black")
+        # TRN estimate dot (always drawn except LOW_CONF – not reliable enough)
+        if r['status'] != "LOW_CONF":
+            draw.ellipse([tx-4, ty-4, tx+4, ty+4], fill=col)
+
+        # Error label every 5th frame for readability
+        if i % 5 == 0 and r['status'] in ("LOCK", "FLOW"):
+            label = f"{r['err_m']:.0f}m"
+            draw.text((tx+6, ty-9), label, fill="white", stroke_width=1)
 
     # Legend
-    draw.rectangle([5, 5, 280, 95], fill=(0, 0, 0, 200))
-    draw.ellipse([12,14,22,24], fill="lime");    draw.text((28,12), "GPS ground truth",  fill="lime")
-    draw.ellipse([12,34,22,44], fill="#00FFFF"); draw.text((28,32), "TRN LOCK (accepted)", fill="#00FFFF")
-    draw.ellipse([12,54,22,64], fill="red");     draw.text((28,52), "EKF REJECTED",      fill="red")
-    draw.ellipse([12,74,22,84], fill="orange");  draw.text((28,72), "Low confidence",    fill="orange")
+    draw.rectangle([5, 5, 290, 115], fill=(0, 0, 0, 180))
+    draw.ellipse([12,14,22,24], fill="lime");     draw.text((28, 12), "GPS ground truth",          fill="lime")
+    draw.ellipse([12,34,22,44], fill="#FFD700");  draw.text((28, 32), "Optical flow tracking",     fill="#FFD700")
+    draw.ellipse([12,54,22,64], fill="#00FFFF");  draw.text((28, 52), "Structural anchor LOCK",    fill="#00FFFF")
+    draw.ellipse([12,74,22,84], fill="#FF4444");  draw.text((28, 72), "EKF rejected",              fill="#FF4444")
+    draw.ellipse([12,94,22,104], fill="#FF8C00"); draw.text((28, 92), "Low confidence (skipped)",  fill="#FF8C00")
 
     OUT_MAP = "sitl_ekf_simulation_map.png"
     im.save(OUT_MAP)
